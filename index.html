@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>WebAR Experience</title>
+
+  <script>
+    (function () {
+      'use strict';
+
+      function isMobileDevice() {
+        var ua = navigator.userAgent || navigator.vendor || '';
+        var mobileUAPattern = /Android|iPhone|iPad|iPod|IEMobile|Opera Mini|Mobile|webOS|BlackBerry/i;
+        var isIPadOS13Plus = navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+        var uaSaysMobile = mobileUAPattern.test(ua) || isIPadOS13Plus;
+
+        var hasTouch =
+          ('ontouchstart' in window) ||
+          (navigator.maxTouchPoints && navigator.maxTouchPoints > 0);
+
+        var hasCoarsePointer =
+          window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+
+        return uaSaysMobile && (hasTouch || hasCoarsePointer);
+      }
+
+      window.__isMobileDevice = isMobileDevice();
+    })();
+  </script>
+
+  <script>
+    if (window.__isMobileDevice) {
+      var mvModule = document.createElement('script');
+      mvModule.type = 'module';
+      mvModule.src = 'https://ajax.googleapis.com/ajax/libs/model-viewer/3.5.0/model-viewer.min.js';
+      document.head.appendChild(mvModule);
+
+      var mvLegacy = document.createElement('script');
+      mvLegacy.setAttribute('nomodule', '');
+      mvLegacy.src = 'https://ajax.googleapis.com/ajax/libs/model-viewer/3.5.0/model-viewer-legacy.js';
+      document.head.appendChild(mvLegacy);
+    }
+  </script>
+
+  <style>
+    /* ============================================================
+       RESET & BASE LAYOUT
+       Full-bleed, no scroll, no native touch gestures stolen by
+       the page chrome (model-viewer handles its own gestures).
+       ============================================================ */
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #C0D5F0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    /* ============================================================
+       MODEL-VIEWER STAGE
+       Fills the viewport. dvh fallback handles mobile browser
+       chrome resizing (Safari/Chrome address bar collapse).
+       ============================================================ */
+    model-viewer {
+      width: 100vw;
+      height: 100vh;
+      height: 100dvh;
+      display: block;
+      background-color: #C0D5F0;
+      --poster-color: transparent;
+      --progress-bar-color: transparent; /* we render our own progress UI */
+    }
+
+    /* ============================================================
+       LOADING OVERLAY
+       Sits above model-viewer until 'load' fires. Pointer-events
+       are intentionally enabled while visible so users can't poke
+       through to AR controls before the model is ready, then fully
+       disabled (and the node hidden) the instant loading completes.
+       ============================================================ */
+    #status-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 24px;
+      background: #C0D5F0;
+      color: #1A365D;
+      text-align: center;
+      padding: 32px;
+      transition: opacity 0.35s ease;
+    }
+
+    /* Ring spinner — quiet, single accent, no extra ornamentation */
+    .spinner {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: 3px solid rgba(26, 54, 93, 0.2);
+      border-top-color: #1A365D;
+      animation: spin 0.9s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    #status-text {
+      font-size: 15px;
+      line-height: 1.5;
+      letter-spacing: 0.01em;
+      color: #1A365D;
+      max-width: 320px;
+    }
+
+    #status-subtext {
+      font-size: 12.5px;
+      color: #2B4C7E;
+      max-width: 280px;
+      line-height: 1.5;
+    }
+
+    /* ---- Error state ---------------------------------------- */
+    #status-overlay.is-error #status-text {
+      color: #C53030;
+      font-weight: 700;
+      font-size: 16px;
+    }
+
+    #status-overlay.is-error .spinner {
+      display: none;
+    }
+
+    #status-overlay.is-error #status-icon {
+      display: flex;
+    }
+
+    #status-icon {
+      display: none;
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: 2px solid #C53030;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+      font-weight: 700;
+      color: #C53030;
+    }
+
+    /* ---- Hidden state (post-load) -----------------------------
+       display:none removes it from layout AND the accessibility
+       tree, and guarantees zero pointer-event interception —
+       belt-and-suspenders alongside the JS-driven pointer-events
+       toggle below. ------------------------------------------- */
+    #status-overlay.is-hidden {
+      display: none;
+      pointer-events: none;
+      opacity: 0;
+    }
+
+    /* ============================================================
+       AR PROMPT / "VIEW IN YOUR SPACE" BUTTON
+       Custom-styled trigger for the AR session, anchored bottom
+       center so it doesn't collide with model-viewer's own
+       default control affordances.
+       ============================================================ */
+    #ar-button {
+        position: absolute;
+        bottom: 28px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 13px 22px;
+   
+    /* Black text color as requested */
+        color: #000000;
+   
+    /* Apple Glassmorphism Gradient & Blur */
+    background: linear-gradient(
+        135deg, 
+        rgba(255, 255, 255, 0.45) 0%, 
+        rgba(255, 255, 255, 0.15) 100%
+    );
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    backdrop-filter: blur(20px) saturate(180%);
+   
+    /* Frosted Glass Border */
+    border: 1px solid rgba(255, 255, 255, 0.4);
+   
+        border-radius: 999px;
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+   
+    /* Soft, elevated depth shadow */
+    box-shadow: 
+        0 8px 32px 0 rgba(0, 0, 0, 0.2),
+        inset 0 1px 1px 0 rgba(255, 255, 255, 0.6);
+     
+        cursor: pointer;
+        transition: all 0.3s ease;
+    }
+
+    #ar-button:active {
+      transform: translateX(-50%) scale(0.97);
+    }
+
+    /* Hide our custom button automatically if AR isn't available
+       on this device/browser — model-viewer toggles the
+       ar-status / ar attribute presence for us via CSS hook. */
+    model-viewer:not([ar]) ~ #ar-button {
+      display: none;
+    }
+
+    @media (max-width: 380px) {
+      #status-text { font-size: 14px; }
+      #ar-button { padding: 12px 18px; font-size: 13px; }
+    }
+
+    /* ============================================================
+       TOP CENTER BRAND WATERMARK
+       ============================================================ */
+    #brand-watermark {
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 9999;
+      font-size: 15px;
+      font-weight: 700;
+      color: #1A365D;
+      letter-spacing: 0.05em;
+      pointer-events: none;
+    }
+
+    /* ============================================================
+       DESKTOP RESTRICTION OVERLAY
+       Shown instead of everything else when a non-mobile device is
+       detected. Replaces the entire experience — model-viewer is
+       never allowed to initialize a session on desktop.
+       ============================================================ */
+    #desktop-block {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      display: none; /* flipped on via JS only when desktop is detected */
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 22px;
+      background: #C0D5F0;
+      color: #2B4C7E;
+      text-align: center;
+      padding: 48px;
+    }
+
+    #desktop-block.is-visible {
+      display: flex;
+    }
+
+    #desktop-block-icon {
+      width: 56px;
+      height: 56px;
+      border-radius: 14px;
+      border: 2px solid #1A365D;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #desktop-block-icon svg {
+      width: 28px;
+      height: 28px;
+      stroke: #1A365D;
+    }
+
+    #desktop-block-title {
+      color: #1A365D;
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      max-width: 420px;
+      line-height: 1.5;
+    }
+
+    #desktop-block-sub {
+      font-size: 13.5px;
+      color: #2B4C7E;
+      max-width: 380px;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="brand-watermark">@webaragency</div>
+
+  <div id="desktop-block" role="alert">
+    <div id="desktop-block-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="5" y="2" width="14" height="20" rx="2"></rect>
+        <line x1="12" y1="18" x2="12.01" y2="18"></line>
+      </svg>
+    </div>
+    <div id="desktop-block-title">
+      This AR experience is exclusively designed for mobile devices. Please open this link on your smartphone or tablet.
+    </div>
+    <div id="desktop-block-sub">
+      Scan this page's URL with your phone's camera, or open it directly in a mobile browser, to view the model in AR.
+    </div>
+  </div>
+
+  <div id="ar-experience">
+
+  <model-viewer
+    id="ar-model"
+    src="model.glb"
+    ios-src="model.usdz"
+    poster="poster.png"
+    alt="3D model AR preview"
+
+    ar
+    ar-modes="scene-viewer webxr quick-look"
+    ar-scale="auto"
+    ar-placement="floor"
+
+    camera-controls
+    touch-action="pan-y"
+    interaction-prompt="auto"
+    shadow-intensity="1"
+    exposure="1"
+    auto-rotate
+  >
+    <button slot="ar-button" id="ar-button">
+      View in your space
+    </button>
+  </model-viewer>
+
+  <div id="status-overlay" role="status" aria-live="polite">
+    <div class="spinner" id="status-spinner" aria-hidden="true"></div>
+    <div id="status-icon" aria-hidden="true">!</div>
+    <div>
+      <div id="status-text">Loading AR Experience... This will take a few minutes.</div>
+      <div id="status-subtext" style="margin-top:10px;">Keep this tab open — larger models can take a moment on slower connections.</div>
+    </div>
+  </div>
+
+  </div><script>
+    // ==================================================================
+    // VANILLA JS — desktop bail-out + load/error wiring
+    // ==================================================================
+    (function () {
+      'use strict';
+
+      var arExperience = document.getElementById('ar-experience');
+      var desktopBlock = document.getElementById('desktop-block');
+
+      if (!window.__isMobileDevice) {
+        // Desktop/laptop path: model-viewer's script was never even
+        // requested (see <head>), so just remove the now-inert markup
+        // and show the restriction overlay.
+        if (arExperience && arExperience.parentNode) {
+          arExperience.parentNode.removeChild(arExperience);
+        }
+        desktopBlock.classList.add('is-visible');
+        return; // bail out — no load/error wiring runs on desktop
+      }
+
+      // ----------------------------------------------------------------
+      // MOBILE PATH — proceed with normal model-viewer wiring
+      // ----------------------------------------------------------------
+      var modelViewer = document.getElementById('ar-model');
+      var overlay      = document.getElementById('status-overlay');
+      var statusText   = document.getElementById('status-text');
+      var statusSub    = document.getElementById('status-subtext');
+
+      var hasResolved = false; // guards against duplicate load/error firing
+
+      /**
+       * Fully retire the loading overlay once the model is ready.
+       * display:none removes it from layout/hit-testing entirely;
+       * pointer-events:none is set explicitly as a defensive second
+       * layer in case any future CSS override re-displays the node.
+       */
+      function hideOverlay() {
+        if (hasResolved) return;
+        hasResolved = true;
+
+        overlay.style.pointerEvents = 'none';
+        overlay.classList.add('is-hidden');
+      }
+
+      /**
+       * Switch the overlay into a permanent, visible error state.
+       * Spinner stops (display:none via CSS), text turns bold red,
+       * and the overlay is deliberately kept in place (and
+       * interactive-blocking) since there is nothing functional
+       * underneath it to interact with.
+       */
+      function showError() {
+        if (hasResolved) return;
+        hasResolved = true;
+
+        overlay.classList.add('is-error');
+        overlay.classList.remove('is-hidden');
+        overlay.style.pointerEvents = 'auto';
+
+        statusText.textContent = 'Error: 3D Model not found!';
+        statusSub.textContent = '';
+      }
+
+      // 'load' fires once the active model source has fully loaded
+      // and is ready to render.
+      modelViewer.addEventListener('load', hideOverlay);
+
+      // 'error' fires on malformed/missing/unreachable model assets
+      // (404s, network failures, parse errors, etc.).
+      modelViewer.addEventListener('error', function (event) {
+        console.error('model-viewer load error:', event && event.detail);
+        showError();
+      });
+
+      // Safety net: if neither event fires within 45s (e.g. a stalled
+      // network request that never resolves to a clean error), surface
+      // the same error state instead of leaving users on an infinite
+      // spinner indefinitely.
+      window.setTimeout(function () {
+        if (!hasResolved) {
+          showError();
+        }
+      }, 45000);
+
+      // Optional: tap-to-launch fallback in case the slotted button's
+      // default AR-launch wiring needs an explicit nudge on some
+      // browsers — model-viewer's slot="ar-button" already triggers
+      // activateAR() on click natively, this is purely defensive.
+      var arButton = document.getElementById('ar-button');
+      arButton.addEventListener('click', function () {
+        if (modelViewer.canActivateAR) {
+          modelViewer.activateAR();
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
